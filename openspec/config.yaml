@@ -1,0 +1,20 @@
+schema: spec-driven
+
+context: |
+  Project: dependency-free Node.js URL shortener
+  Runtime: Node.js using CommonJS modules
+  No third-party dependencies; use built-in Node APIs only
+  Scripts: `npm start` runs `node server.js`, `npm test` runs `node --test`
+  Keep the implementation small, explicit, and easy to reason about
+  Prefer simple HTTP/server logic over frameworks
+  Domain: shorten long URLs into stable short codes and redirect back to the original URL
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
