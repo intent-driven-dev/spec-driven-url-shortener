@@ -8,6 +8,8 @@ const path = require('path');
 const test = require('node:test');
 
 const { createServer } = require('../server');
+const { UrlStore } = require('../lib/url-store');
+const { DAY_IN_MS, getNextUtcMidnightDelay } = require('../lib/url-cleanup');
 
 function request(port, options, body) {
   return new Promise((resolve, reject) => {
@@ -155,7 +157,7 @@ test('redirects known codes and returns not found for missing codes', async () =
   }
 });
 
-test('persists mappings across a restart', async () => {
+test('persists mappings across a restart with creation timestamps', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'url-shortener-'));
   const dataFilePath = path.join(tempDir, 'urls.json');
 
@@ -194,8 +196,91 @@ test('persists mappings across a restart', async () => {
     assert.equal(redirect.headers.location, 'https://example.com/persisted');
 
     const saved = JSON.parse(await fs.readFile(dataFilePath, 'utf8'));
-    assert.equal(saved[code], 'https://example.com/persisted');
+    assert.equal(saved[code].longUrl, 'https://example.com/persisted');
+    assert.match(saved[code].createdAt, /^\d{4}-\d{2}-\d{2}T/);
   } finally {
     await secondServer.close();
   }
+});
+
+test('expires mappings after 90 days during startup cleanup', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'url-shortener-'));
+  const dataFilePath = path.join(tempDir, 'urls.json');
+  const expiredAt = new Date(Date.now() - 91 * DAY_IN_MS).toISOString();
+
+  await fs.writeFile(
+    dataFilePath,
+    JSON.stringify(
+      {
+        expiredcode: {
+          longUrl: 'https://example.com/expired',
+          createdAt: expiredAt,
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  const server = await startTestServer(dataFilePath);
+
+  try {
+    const redirect = await request(server.port, {
+      method: 'GET',
+      path: '/expiredcode',
+    });
+
+    assert.equal(redirect.statusCode, 404);
+
+    const saved = JSON.parse(await fs.readFile(dataFilePath, 'utf8'));
+    assert.equal(Object.keys(saved).length, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test('cleanup removes expired and legacy mappings while keeping fresh ones', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'url-shortener-'));
+  const dataFilePath = path.join(tempDir, 'urls.json');
+  const store = new UrlStore(dataFilePath);
+  const now = Date.UTC(2026, 4, 25, 12, 0, 0, 0);
+  const freshCreatedAt = new Date(now - 7 * DAY_IN_MS).toISOString();
+  const expiredCreatedAt = new Date(now - 91 * DAY_IN_MS).toISOString();
+
+  await fs.writeFile(
+    dataFilePath,
+    JSON.stringify(
+      {
+        freshcode: {
+          longUrl: 'https://example.com/fresh',
+          createdAt: freshCreatedAt,
+        },
+        stalelegacy: 'https://example.com/legacy',
+        expiredcode: {
+          longUrl: 'https://example.com/expired',
+          createdAt: expiredCreatedAt,
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  await store.load();
+  const deleted = await store.deleteExpiredRecords(now);
+
+  assert.equal(deleted, 2);
+  assert.equal(store.get('freshcode'), 'https://example.com/fresh');
+  assert.equal(store.get('stalelegacy'), null);
+  assert.equal(store.get('expiredcode'), null);
+
+  const saved = JSON.parse(await fs.readFile(dataFilePath, 'utf8'));
+  assert.deepEqual(Object.keys(saved), ['freshcode']);
+  assert.equal(saved.freshcode.longUrl, 'https://example.com/fresh');
+  assert.equal(saved.freshcode.createdAt, freshCreatedAt);
+});
+
+test('schedules cleanup at the next UTC midnight', () => {
+  const delay = getNextUtcMidnightDelay(new Date(Date.UTC(2026, 4, 25, 23, 15, 0, 0)));
+  assert.equal(delay, 45 * 60 * 1000);
 });

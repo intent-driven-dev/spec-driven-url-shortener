@@ -5,6 +5,7 @@ const path = require('path');
 
 const { reserveUniqueShortCode } = require('./lib/code-generator');
 const { UrlStore } = require('./lib/url-store');
+const { scheduleDailyUtcCleanup } = require('./lib/url-cleanup');
 const { isValidHttpUrl } = require('./lib/url-validation');
 
 function defaultDataFilePath() {
@@ -137,14 +138,36 @@ function createRequestHandler(store) {
 }
 
 async function createServer(options = {}) {
+  const app = await createApplication(options);
+  return app.server;
+}
+
+async function createApplication(options = {}) {
   const store = new UrlStore(options.dataFilePath || defaultDataFilePath());
   await store.load();
-  return http.createServer(createRequestHandler(store));
+  await store.deleteExpiredRecords();
+
+  return {
+    store,
+    server: http.createServer(createRequestHandler(store)),
+  };
 }
 
 async function start() {
   const port = Number(process.env.PORT || '3000');
-  const server = await createServer();
+  const app = await createApplication();
+  const cleanupJob = scheduleDailyUtcCleanup(app.store, {
+    onError(error) {
+      process.stderr.write(
+        `${error.stack || error.message || 'Expiration cleanup failed'}\n`,
+      );
+    },
+  });
+  const server = app.server;
+
+  server.on('close', () => {
+    cleanupJob.cancel();
+  });
 
   server.listen(port, () => {
     process.stdout.write(`Listening on port ${port}\n`);
@@ -161,6 +184,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  createApplication,
   createServer,
   createRequestHandler,
   start,
